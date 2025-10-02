@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import risk  # clean import
+from .routes import live_risk  # ✅ use live_risk instead of risk
 
 app = FastAPI(title="Wave Warn V2 API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=["*"],  # tighten later if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,5 +24,6 @@ def health_check():
 def ping():
     return {"status": "ok"}
 
-# mount router module
-app.include_router(risk.router, tags=["risk"])
+# ✅ mount only live_risk router
+app.include_router(live_risk.router, tags=["risk"])
+
