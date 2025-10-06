@@ -25,4 +25,5 @@ def risk_timeline(
             "score": score
         })
 
-    return {"ok": True, "location": {"lat": lat, "lon": lon}, "timeline": out}
+    return {"ok": True, "location": {"lat": lat, "lon": lon}, 
+"points":out}
