@@ -1,7 +1,7 @@
-# src/wavewarn/routes/risk.py
+# src/wavewarn/routes/live_risk.py
 from fastapi import APIRouter, Query
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter()
 
@@ -9,16 +9,16 @@ router = APIRouter()
 def live_risk(
     lat: float = Query(..., description="Latitude"),
     lon: float = Query(..., description="Longitude"),
-    ts: Optional[int] = Query(None, description="Unix timestamp (seconds); optional"),
+    ts: Optional[int] = Query(None, description="Unix timestamp (seconds)")
 ):
     """
-    Stub endpoint: returns a deterministic dummy risk so the app can integrate.
-    Replace later with real WBGT/HI + satellite anomaly fusion.
+    Simple stub risk score based on location. Replace with real model later.
     """
-    # Use a simple, stable pseudo-score based on coordinates (for demo)
+    # stable pseudo-score from lat/lon
     base = (abs(int(lat * 10)) + abs(int(lon * 10))) % 100
     score = max(0, min(100, base))
 
+    # Use explicit branches to avoid multi-line ternary issues
     if score >= 75:
         tier = "extreme"
     elif score >= 50:
@@ -28,17 +28,19 @@ def live_risk(
     else:
         tier = "safe"
 
-    now_iso = datetime.utcfromtimestamp(ts).isoformat() + "Z" if ts else datetime.utcnow().isoformat() + "Z"
+    when = (datetime.fromtimestamp(ts, tz=timezone.utc) if ts
+            else datetime.now(timezone.utc)).isoformat()
 
     return {
         "ok": True,
-        "when": now_iso,
+        "when": when,
         "location": {"lat": lat, "lon": lon},
         "score": score,
         "tier": tier,
         "drivers": {
-            "heat_index": 0.6 * score,   # dummy driver values
-            "wbgt": 0.5 * score,
-            "lst_anomaly": 0.2 * score,
-        }
+            "heat_index": round(0.6 * score, 2),
+            "wbgt": round(0.5 * score, 2),
+            "lst_anomaly": round(0.2 * score, 2),
+        },
     }
+
