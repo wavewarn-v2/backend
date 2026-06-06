@@ -16,7 +16,8 @@ from datetime import datetime, timezone, timedelta
 from ..models import RiskPoint, RiskTimeline
 
 from ..utils.openmeteo_air_client import fetch_air_quality
-from ..utils.forecast_utils import group_hourly_to_daily, daily_mean
+from ..utils.forecast_utils import group_hourly_to_daily, daily_mean, daily_max, decay_extrapolate
+from ..utils.openmeteo_weather_client import fetch_weather_hourly
 from ..utils.aqi import aqi_pm25, aqi_o3, aqi_overall, aqi_tier
 
 router = APIRouter(prefix="/risk/model", tags=["risk-model"])
@@ -102,13 +103,14 @@ def daily_insight(heat_tier: str, aq_tier_value: str | None, peak_hour) -> str:
 def get_daily_air_quality(lat: float, lon: float, days: int) -> Dict[str, Dict[str, Any]]:
     try:
         aq_days = min(days, 5)
+        extend_days = max(0, min(5, days - aq_days))
+
         aq = fetch_air_quality(lat, lon, days=aq_days)
         hh = aq.get("hourly", {})
 
         times = hh.get("time", [])
         pm25 = hh.get("pm2_5", []) or []
         ozone_ugm3 = hh.get("ozone", []) or []
-
         ozone_ppb = [None if v is None else float(v) / 2.0 for v in ozone_ugm3]
 
         pm25_by_day = group_hourly_to_daily(times, pm25)
@@ -118,7 +120,6 @@ def get_daily_air_quality(lat: float, lon: float, days: int) -> Dict[str, Dict[s
         o3_daily = daily_mean(o3_by_day)
 
         days_sorted = sorted(pm25_daily.keys() | o3_daily.keys())
-
         out: Dict[str, Dict[str, Any]] = {}
 
         for d in days_sorted:
@@ -128,19 +129,80 @@ def get_daily_air_quality(lat: float, lon: float, days: int) -> Dict[str, Dict[s
             a_pm25 = aqi_pm25(p)
             a_o3 = aqi_o3(o)
             a_all = aqi_overall(p, o)
-            tier = aqi_tier(a_all)
 
             out[d] = {
                 "aqi": a_all,
-                "tier": tier,
+                "tier": aqi_tier(a_all),
                 "pm25_ugm3": p,
                 "o3_ppb": o,
                 "source": "Open-Meteo AQ",
                 "confidence": "high",
-                "components": {
-                    "pm25": a_pm25,
-                    "o3": a_o3,
-                },
+                "components": {"pm25": a_pm25, "o3": a_o3},
+            }
+
+        if extend_days == 0 or not days_sorted:
+            return out
+
+        wx = fetch_weather_hourly(lat, lon, days=min(10, days))
+        wh = wx.get("hourly", {})
+
+        wt = wh.get("time", [])
+        t2m = wh.get("temperature_2m", []) or []
+        wspd = wh.get("wind_speed_10m", []) or []
+
+        t_by_day = group_hourly_to_daily(wt, t2m)
+        w_by_day = group_hourly_to_daily(wt, wspd)
+
+        t_daily_max = daily_max(t_by_day)
+        w_daily_mean = daily_mean(w_by_day)
+
+        last_aq_date = days_sorted[-1]
+        ref_t = t_daily_max.get(last_aq_date) or 30.0
+        ref_w = w_daily_mean.get(last_aq_date) or 2.0
+
+        last_pm25 = pm25_daily.get(last_aq_date)
+        last_o3 = o3_daily.get(last_aq_date)
+
+        pm25_decay = decay_extrapolate(last_pm25, extend_days, half_life_days=3.0)
+        o3_decay = decay_extrapolate(last_o3, extend_days, half_life_days=3.0)
+
+        wx_days_sorted = sorted(t_daily_max.keys())
+
+        for i in range(extend_days):
+            try:
+                idx = wx_days_sorted.index(last_aq_date) + (i + 1)
+            except Exception:
+                idx = len(days_sorted) + i
+
+            if idx >= len(wx_days_sorted):
+                continue
+
+            d = wx_days_sorted[idx]
+            tmax = t_daily_max.get(d, ref_t)
+            wavg = w_daily_mean.get(d, ref_w)
+
+            temp_adj = min(0.20, max(-0.20, 0.03 * ((tmax - ref_t) / 2.0)))
+            wind_adj_pm = min(0.20, max(-0.20, -0.03 * ((wavg - ref_w) / 2.0)))
+            wind_adj_o3 = min(0.20, max(-0.20, 0.01 * ((wavg - ref_w) / 2.0)))
+
+            base_pm = pm25_decay[i] if pm25_decay else None
+            base_o3 = o3_decay[i] if o3_decay else None
+
+            pm_est = None if base_pm is None else max(0.0, base_pm * (1.0 + temp_adj + wind_adj_pm))
+            o3_est = None if base_o3 is None else max(0.0, base_o3 * (1.0 + temp_adj + wind_adj_o3))
+
+            a_pm25 = aqi_pm25(pm_est)
+            a_o3 = aqi_o3(o3_est)
+            a_all = aqi_overall(pm_est, o3_est)
+
+            out[d] = {
+                "aqi": a_all,
+                "tier": aqi_tier(a_all),
+                "pm25_ugm3": pm_est,
+                "o3_ppb": o3_est,
+                "source": "Extrapolated (AQ decay + met adj)",
+                "confidence": "low",
+                "components": {"pm25": a_pm25, "o3": a_o3},
             }
 
         return out
