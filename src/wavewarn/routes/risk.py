@@ -14,11 +14,19 @@ from typing import List, Dict, Any
 import httpx
 from datetime import datetime, timezone, timedelta
 from ..models import RiskPoint, RiskTimeline
+import time
 
 from ..utils.openmeteo_air_client import fetch_air_quality
 from ..utils.forecast_utils import group_hourly_to_daily, daily_mean, daily_max, decay_extrapolate
 from ..utils.openmeteo_weather_client import fetch_weather_hourly
 from ..utils.aqi import aqi_pm25, aqi_o3, aqi_overall, aqi_tier
+
+
+# Simple in-memory cache
+_weather_cache = {}
+
+# Cache lifetime (15 minutes)
+CACHE_TTL = 900
 
 router = APIRouter(prefix="/risk/model", tags=["risk-model"])
 
@@ -225,13 +233,41 @@ def build_openmeteo_hourly_url(lat: float, lon: float, hours: int) -> str:
 
 
 def fetch_openmeteo_hourly(lat: float, lon: float, hours: int) -> dict:
+    # Round coordinates to improve cache hits
+    key = (round(lat, 4), round(lon, 4), hours)
+
+    now = time.time()
+
+    # Return cached data if still valid
+    if key in _weather_cache:
+        cached_time, cached_data = _weather_cache[key]
+
+        if now - cached_time < CACHE_TTL:
+            return cached_data
+
     url = build_openmeteo_hourly_url(lat, lon, hours)
 
-    with httpx.Client(timeout=30.0) as c:
-        r = c.get(url, headers={"Accept": "application/json"})
+    try:
+        with httpx.Client(timeout=30.0) as c:
+            r = c.get(url, headers={"Accept": "application/json"})
 
-    r.raise_for_status()
-    return r.json()
+        r.raise_for_status()
+
+        data = r.json()
+
+        # Save to cache
+        _weather_cache[key] = (now, data)
+
+        return data
+
+    except httpx.HTTPStatusError as e:
+
+        # If Open-Meteo rate limits us,
+        # return old cached data if available.
+        if e.response.status_code == 429 and key in _weather_cache:
+            return _weather_cache[key][1]
+
+        raise
 
 
 @router.get("/live", response_model=dict)
